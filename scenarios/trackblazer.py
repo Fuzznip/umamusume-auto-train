@@ -86,6 +86,67 @@ TRACKBLAZER_SHOP_ICON_MAX_X_RATIO = 0.4
 TRACKBLAZER_ITEM_CATALOG_CACHE = None
 TRACKBLAZER_QTY_DIGIT_TEMPLATE_CACHE = None
 
+_TRACKBLAZER_OFFSET_APPLIED = False
+
+def adjust_trackblazer_x_coords(offset):
+  """Align trackblazer module-level coordinates with the active game window.
+
+  Must be called AFTER constants.adjust_constants_x_coords (or instead of it
+  for the Steam-native path, where constants receives no shift).
+
+  Two coordinate categories exist in this module:
+
+  1. BBOX/REGION values are derived from constants.GAME_WINDOW_BBOX at import
+     time, so they already embed the Steam-default x=155 origin.  They need the
+     same *delta* that was applied to constants (i.e. `offset`).
+
+  2. Raw device-relative values (LTRB panels, scroll positions, click positions)
+     are calibrated for game content at x=0.  They need to be shifted to the
+     absolute game window origin, which is constants.GAME_WINDOW_BBOX[0] after
+     constants has been updated.
+
+  Do NOT call this for ADB (offset=-155): the BBOX delta would produce x=-30
+  (outside device bounds) and the raw values are already valid at x=0-based
+  device coordinates.
+  """
+  global _TRACKBLAZER_OFFSET_APPLIED
+  if _TRACKBLAZER_OFFSET_APPLIED:
+    return
+
+  # Read game window origin AFTER constants has been updated by the caller.
+  game_window_x = constants.GAME_WINDOW_BBOX[0]
+
+  import sys
+  g = sys.modules[__name__].__dict__
+
+  for name, value in list(g.items()):
+    if not isinstance(value, tuple):
+      continue
+
+    # --- BBOX/REGION: Steam-calibrated, apply the same delta as constants ---
+    # (x, y, w, h) — shift x only
+    if name.endswith("_REGION") and len(value) == 4:
+      g[name] = (value[0] + offset, value[1], value[2], value[3])
+
+    # (x1, y1, x2, y2) — shift both x coords
+    elif name.endswith("_BBOX") and len(value) == 4:
+      g[name] = (value[0] + offset, value[1], value[2] + offset, value[3])
+
+    # --- Raw device-relative: shift to absolute game window origin ---
+    # (left, top, right, bottom)
+    elif (name.endswith("_LTRB") or name.endswith("_FROM_SCREEN")) and len(value) == 4:
+      g[name] = (value[0] + game_window_x, value[1], value[2] + game_window_x, value[3])
+
+    # (x, y)
+    elif (
+      name.endswith("_MOUSE_POS")
+      or name.endswith("_POSITION")
+      or name.endswith("_SCROLL_START")
+      or name.endswith("_SCROLL_END")
+    ) and len(value) == 2:
+      g[name] = (value[0] + game_window_x, value[1])
+
+  _TRACKBLAZER_OFFSET_APPLIED = True
 
 def _dedup_boxes(boxes, min_dist=8):
   filtered = []
@@ -706,7 +767,7 @@ def _find_button_center_on_full_screen(template_path, threshold=0.85, full_scree
   return (x + w // 2, y + h // 2)
 
 
-def _open_trackblazer_inventory(threshold=0.85):
+def _open_trackblazer_inventory(threshold=0.75):
   if not device_action.locate_and_click(
     TRACKBLAZER_INVENTORY_BTN_PATH,
     confidence=threshold,
@@ -800,12 +861,17 @@ def _dismiss_trackblazer_post_purchase_popup():
 def _scroll_trackblazer_shop_once(extra_scroll_pixels=0):
   before_scroll = device_action.screenshot(region_ltrb=TRACKBLAZER_SHOP_PANEL_LTRB)
 
-  base_start_x, base_start_y = TRACKBLAZER_SHOP_SCROLL_START
-  base_end_x, base_end_y = TRACKBLAZER_SHOP_SCROLL_END
-  base_delta = base_start_y - base_end_y
+  scroll_x = TRACKBLAZER_SHOP_SCROLL_START[0]
+  shop_top = TRACKBLAZER_SHOP_PANEL_LTRB[1]
+
+  # Start just inside the top edge of the shop panel.  With any clamped delta
+  # >= 20 the computed end_y lands above shop_top, so the finger rests outside
+  # the panel and cannot accidentally trigger a purchase on release.
+  base_start_y = shop_top + 10
+  base_delta = TRACKBLAZER_SHOP_ROW_HEIGHT  # one row per scroll
   adjusted_delta = base_delta + int(extra_scroll_pixels)
   adjusted_delta = max(20, min(TRACKBLAZER_SHOP_ROW_HEIGHT + 70, adjusted_delta))
-  target_end = (base_start_x, int(base_start_y - adjusted_delta))
+  target_end = (scroll_x, int(base_start_y - adjusted_delta))
 
   # Swipe with a 1-second hold at the end before releasing.
   # For ADB: total duration includes travel + hold, so we use a long duration.
@@ -813,16 +879,16 @@ def _scroll_trackblazer_shop_once(extra_scroll_pixels=0):
   if device_action.bot.use_adb:
     import utils.adb_actions as _adb
     _adb.swipe(
-      base_start_x, base_start_y,
+      scroll_x, base_start_y,
       target_end[0], target_end[1],
       duration=1.5,  # ~0.5s travel + 1s hold baked into ADB gesture duration
     )
   else:
     import utils.pyautogui_actions as _pg
-    _pg.moveTo(base_start_x, base_start_y, duration=0.1)
+    _pg.moveTo(scroll_x, base_start_y, duration=0.1)
     _pg.hold()
     _pg.moveTo(target_end[0], target_end[1], duration=0.5)
-    sleep(1.0)  # hold at end before releasing
+    sleep(1.0)  # hold at end before releasing; end is above shop panel so no accidental selection
     _pg.release()
   device_action.flush_screenshot_cache()
   sleep(TRACKBLAZER_SHOP_SCROLL_SETTLE_WAIT)
@@ -1697,7 +1763,7 @@ def collect_trackblazer_shop_snapshot(item_catalog, threshold=0.85, max_scrolls=
   return shop_items, shop_coins, []
 
 
-def collect_trackblazer_owned_items_snapshot(item_catalog, threshold=0.85, max_scrolls=20):
+def collect_trackblazer_owned_items_snapshot(item_catalog, threshold=0.75, max_scrolls=20):
   if not _open_trackblazer_inventory(threshold=threshold):
     return []
 

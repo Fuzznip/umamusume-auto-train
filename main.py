@@ -68,6 +68,9 @@ def focus_umamusume():
   if bot.use_adb:
     info("Using ADB no need to focus window.")
     constants.adjust_constants_x_coords(offset=-155)
+    # Do NOT call adjust_trackblazer_x_coords for ADB: all trackblazer values
+    # are calibrated for device-relative coords (game at x=0) and are already
+    # correct without any shift.
     return True
   try:
     import pyautogui
@@ -86,6 +89,8 @@ def focus_umamusume():
         return False
 
       constants.adjust_constants_x_coords()
+      from scenarios.trackblazer import adjust_trackblazer_x_coords
+      adjust_trackblazer_x_coords(offset=405)
       if target_window.isMinimized:
         target_window.restore()
       else:
@@ -112,6 +117,10 @@ def focus_umamusume():
       target_window.restore()
       sleep(0.5)
     bot.windows_window = target_window
+    # Shift raw device-relative trackblazer coords to Steam screen space (+155).
+    # BBOX/REGION values are already Steam-calibrated, so offset=0 leaves them unchanged.
+    from scenarios.trackblazer import adjust_trackblazer_x_coords
+    adjust_trackblazer_x_coords(offset=0)
     if target_window.width > 1920 or target_window.height > 1080:
       info("Screen bigger than standard 1080p. Initializing screen space conversions.")
       screen_to_world_conversion_init()
